@@ -1,0 +1,7 @@
+# Secrets — never commit
+*_key.txt
+
+# Runtime
+responses/
+inbox/
+__pycache__/

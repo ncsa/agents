@@ -1,0 +1,47 @@
+# Lightweight folder-watching agent.
+#
+# Watches `watch_dir` for activity and, when changed files settle, sends their
+# contents to Lumen using Prompt.md as the instruction, then saves the response.
+# All relative paths are resolved against this config file's folder.
+
+# Folder to watch. Point it at a local folder or a Google Drive for Desktop folder.
+# Created automatically if it does not exist.
+watch_dir: ./inbox
+
+# The instruction that decides how to act on changed files (see Prompt.md).
+prompt: Prompt.md
+
+# Lumen model (served by the NCSA Lumen gateway).
+model: glm-5.3
+
+# Polling. A changed file must look identical for `stable_polls` consecutive checks
+# after it is first seen before it is acted on, so a file still being written (or
+# mid-Drive-sync) is not picked up half-done. stable_polls: 0 acts immediately.
+interval: 5          # seconds between checks
+stable_polls: 1
+
+# What counts as activity: any of added, modified, removed.
+events: [added, modified]
+recursive: true
+
+# Which files to consider. include: extensions (empty list = every file).
+# exclude: glob patterns on the file name. Hidden files and the output folder are
+# always skipped.
+include: [.txt, .md, .csv, .pdf, .docx]
+exclude: ["*.tmp", "~*"]
+
+# How much of each file to send, and whether to make one model call per batch of
+# settled changes (false) or a separate call per file (true).
+max_file_chars: 100000
+per_file: false
+
+# On startup, treat files already present as new and act on them once. Default
+# false: only act on changes made after the agent starts.
+process_existing: false
+
+# Where responses are written (relative to this config's folder). Each action saves
+# a timestamped file with the response and the exact context that produced it.
+output_dir: responses
+
+# Assemble and save the prompt + context WITHOUT calling Lumen (for trying things out).
+dry_run: false
