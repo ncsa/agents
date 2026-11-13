@@ -37,6 +37,15 @@ DEFAULTS = {
     "recursive": True, "include": [], "exclude": [], "max_file_chars": 100000,
     "per_file": False, "process_existing": False, "output_dir": "responses",
     "dry_run": False, "comment_docx": False,
+    # Source of what to watch: "local" (files in watch_dir) or "gdrive" (Google Docs
+    # read + commented via gdoc.py as the signed-in user). For gdrive, give EITHER a
+    # folder_id (watch every Doc in it) OR doc_ids (watch just those Docs). Each may
+    # be a bare ID or a pasted Drive/Docs URL.
+    "source": "local", "folder_id": "", "doc_ids": [],
+    # Cap how many comments one pass may post (0 = no limit). 1 = a single note,
+    # framed as the student's single next step. (gdrive mode always keeps a single
+    # open comment and always replies to others' threads.)
+    "max_notes": 0,
 }
 
 
@@ -82,16 +91,25 @@ def load_agent(folder, name, reg_defaults=None, cli_overrides=None, entry_overri
         raise FileNotFoundError(f"{name}: prompt file not found: {prompt_path}")
     with open(prompt_path, encoding="utf-8") as f:
         prompt_text = f.read().strip()
-    watch_dir = _abs(folder, cfg["watch_dir"])
     out_dir = _abs(folder, cfg["output_dir"])
-    os.makedirs(watch_dir, exist_ok=True)
     os.makedirs(out_dir, exist_ok=True)
+    if cfg.get("source") == "gdrive":
+        if not cfg.get("folder_id") and not cfg.get("doc_ids"):
+            raise FileNotFoundError(f"{name}: source is gdrive but no folder_id or doc_ids in config.yaml")
+        if cfg.get("doc_ids"):
+            watch_dir = f"{len(cfg['doc_ids'])} Google Doc(s)"  # display only
+        else:
+            watch_dir = f"Google Drive folder {cfg['folder_id']}"
+    else:
+        watch_dir = _abs(folder, cfg["watch_dir"])
+        os.makedirs(watch_dir, exist_ok=True)
     return {"name": name, "folder": folder, "cfg": cfg, "prompt_text": prompt_text,
             "watch_dir": watch_dir, "out_dir": out_dir,
             "skip_abs": os.path.realpath(out_dir),
-            "base": None, "prev_sig": {}, "stable": {},
+            "base": None, "prev_sig": {}, "stable": {}, "_gdocs": {},
             # live status (read by the dashboard)
-            "running": False, "last_poll": None, "last_action": None,
+            "running": False, "acting": False, "_act_depth": 0,
+            "last_poll": None, "last_action": None,
             "actions": 0, "error": None, "recent": []}
 
 
@@ -213,6 +231,20 @@ def save_response(out_dir, tag, context, response):
     return path
 
 
+def _acting(fn):
+    """Decorator: mark the agent as actively taking an action (for the dashboard's live
+    indicator) while fn runs. Counter-based so nested action calls don't clear it early."""
+    def wrap(agent, *a, **k):
+        agent["_act_depth"] = agent.get("_act_depth", 0) + 1
+        agent["acting"] = True
+        try:
+            return fn(agent, *a, **k)
+        finally:
+            agent["_act_depth"] = max(0, agent.get("_act_depth", 1) - 1)
+            agent["acting"] = agent["_act_depth"] > 0
+    return wrap
+
+
 def read_docx_comments(path):
     """Text of comments already present in a .docx (so the agent doesn't repeat
     itself). Reads word/comments.xml straight from the zip — independent of the
@@ -237,13 +269,19 @@ def read_docx_comments(path):
 def _comment_messages(agent, rel, changes_text, body, existing):
     """System = the agent's Prompt.md plus the strict JSON output contract this mode
     needs; user = the changes, the document text, and comments already left."""
+    single = agent["cfg"].get("max_notes") == 1
+    if single:
+        howmany = ("Return EXACTLY ONE note: the single most useful next step for them "
+                   "right now (if there is a safety concern, that IS the next step). "
+                   'Return {"notes": []} only if nothing is needed.')
+    else:
+        howmany = ('Return {"notes": []} if there is nothing new worth saying.')
     contract = (
         "OUTPUT FORMAT (required): reply with ONLY a JSON object, no prose around it:\n"
         '{"notes": [{"quote": "<a short snippet, <=12 words, copied EXACTLY from the '
         'document, marking where this note belongs>", "comment": "<your guidance>"}]}\n'
-        'Use "quote": "" for a general note not tied to one spot. Return {"notes": []} '
-        "if there is nothing new worth saying. Do NOT repeat guidance you have already "
-        "left (listed below)."
+        'Use "quote": "" for a general note not tied to one spot. ' + howmany + " Do NOT "
+        "repeat guidance you have already left (listed below)."
     )
     already = "\n".join(f"- {c}" for c in existing) or "(none yet)"
     user = (f"CHANGES:\n{changes_text}\n\nDOCUMENT ({rel}):\n{body}\n\n"
@@ -310,6 +348,7 @@ def insert_docx_comments(path, notes, author):
     return added
 
 
+@_acting
 def _comment_on_docx(agent, rel, changes_text, log):
     """Comment-in-place on one .docx. Returns True if the file was written."""
     cfg, folder = agent["cfg"], agent["watch_dir"]
@@ -331,6 +370,8 @@ def _comment_on_docx(agent, rel, changes_text, log):
         log(f"ERROR calling Lumen: {e}")
         return False
     notes = _parse_notes(raw)
+    if cfg.get("max_notes"):
+        notes = notes[:cfg["max_notes"]]
     if not notes:
         log(f"{rel}: no new guidance")
         return False
@@ -348,9 +389,160 @@ def _comment_on_docx(agent, rel, changes_text, log):
     return True
 
 
+def _thread_transcript(comment):
+    lines = []
+    for i, m in enumerate([comment] + (comment.get("replies") or [])):
+        who = "You" if (m.get("author") or {}).get("me") else \
+              ((m.get("author") or {}).get("displayName") or "Student")
+        lines.append(f"{who}: {m.get('content', '')}")
+    return "\n".join(lines)
+
+
+def _gdrive_in_open_thread(threads):
+    """True if we (the signed-in user) authored or replied in any unresolved thread —
+    i.e. a mentor conversation is already open on this Doc."""
+    for c in threads:
+        if (c.get("author") or {}).get("me"):
+            return True
+        if any((r.get("author") or {}).get("me") for r in (c.get("replies") or [])):
+            return True
+    return False
+
+
+@_acting
+def _gdrive_post_comment(agent, doc_id, name, existing_contents, log):
+    """Post a single new top-level coaching comment (the student's next step)."""
+    import gdoc
+    cfg = agent["cfg"]
+    try:
+        body = gdoc.read_text(doc_id)
+    except Exception as e:                                 # noqa: BLE001
+        log(f"ERROR reading {name}: {e}")
+        return
+    msgs = _comment_messages(agent, name, f"The student edited: {name}", body, existing_contents)
+    if cfg["dry_run"]:
+        p = save_response(agent["out_dir"], name.replace("/", "_"), msgs[-1]["content"],
+                          "(dry run — would post one Drive comment)")
+        agent["actions"] += 1
+        agent["last_action"] = {"at": time.time(), "files": [name], "file": os.path.basename(p)}
+        log(f"dry-run: would comment on {name}")
+        return
+    try:
+        raw = call_lumen(cfg["model"], msgs)
+    except Exception as e:                                 # noqa: BLE001
+        log(f"ERROR calling Lumen: {e}")
+        return
+    notes = _parse_notes(raw)[:1]                          # one open comment = one next step
+    if not notes:
+        log(f"{name}: no new guidance")
+        return
+    n = notes[0]
+    content = f'Re: "{n["quote"]}" — {n["comment"]}' if n.get("quote") else n["comment"]
+    try:
+        gdoc.add_comment(doc_id, content)
+    except Exception as e:                                 # noqa: BLE001
+        log(f"ERROR commenting on {name}: {e}")
+        return
+    agent["actions"] += 1
+    agent["last_action"] = {"at": time.time(), "files": [name], "file": name}
+    log(f"posted next-step comment on {name}")
+
+
+@_acting
+def _gdrive_reply(agent, doc_id, name, comment, log):
+    """Reply once in a thread whose last message is from someone other than us."""
+    import gdoc
+    cfg = agent["cfg"]
+    try:
+        body = gdoc.read_text(doc_id)
+    except Exception:                                      # noqa: BLE001
+        body = ""
+    system = agent["prompt_text"] + "\n\n" + (
+        "Someone (not you) has posted in this comment thread. Continue the coaching in a "
+        "single short reply (a sentence or two): answer their question or point them to "
+        "their next step, still without handing over the full solution. Reply with ONLY "
+        "the reply text — no JSON, no preamble.")
+    user = f"DOCUMENT ({name}):\n{body}\n\nCOMMENT THREAD:\n{_thread_transcript(comment)}"
+    msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    if cfg["dry_run"]:
+        p = save_response(agent["out_dir"], name.replace("/", "_") + "-reply", user,
+                          "(dry run — would reply in the thread)")
+        agent["actions"] += 1
+        agent["last_action"] = {"at": time.time(), "files": [name], "file": os.path.basename(p)}
+        log(f"dry-run: would reply in a thread on {name}")
+        return
+    try:
+        text = call_lumen(cfg["model"], msgs).strip()
+    except Exception as e:                                 # noqa: BLE001
+        log(f"ERROR calling Lumen (reply): {e}")
+        return
+    if not text:
+        return
+    try:
+        gdoc.reply_to_comment(doc_id, comment["id"], text)
+    except Exception as e:                                 # noqa: BLE001
+        log(f"ERROR replying on {name}: {e}")
+        return
+    agent["actions"] += 1
+    agent["last_action"] = {"at": time.time(), "files": [name], "file": name}
+    log(f"replied in a thread on {name}")
+
+
+def poll_gdrive(agent, log):
+    """One gdrive poll: (1) reply to any unresolved thread whose last message is from
+    someone other than us, and (2) post at most one unresolved coaching comment per Doc,
+    only when the content has settled and no mentor conversation is already open."""
+    import gdoc
+    cfg = agent["cfg"]
+    agent["last_poll"] = time.time()
+    cur = _snap(agent)                                     # refreshes agent["_gdocs"]
+    d = diff(agent["base"], cur)
+    changed = d["added"] + d["modified"]
+    for p in changed:
+        agent["stable"][p] = agent["stable"].get(p, 0) + 1 if agent["prev_sig"].get(p) == cur.get(p) else 0
+    agent["prev_sig"] = cur
+    settled = {p for p in changed if agent["stable"].get(p, 0) >= cfg["stable_polls"]}
+
+    for doc_id, meta in (agent.get("_gdocs") or {}).items():
+        name = meta.get("name", doc_id)
+        try:
+            threads = gdoc.list_threads(doc_id)           # unresolved only
+        except Exception as e:                             # noqa: BLE001
+            log(f"ERROR reading threads on {name}: {e}")
+            continue
+        # (1) answer anyone but ourselves: a thread whose last message isn't ours.
+        for c in threads:
+            chain = [c] + (c.get("replies") or [])
+            if (chain[-1].get("author") or {}).get("me"):
+                continue
+            _gdrive_reply(agent, doc_id, name, c, log)
+        # (2) offer the next step only on a settled edit, and only if no mentor thread
+        #     is already open (keeps it to a single unresolved comment at a time).
+        if doc_id in settled:
+            try:
+                threads = gdoc.list_threads(doc_id)       # re-read (we may have just replied)
+            except Exception:                             # noqa: BLE001
+                pass
+            if not _gdrive_in_open_thread(threads):
+                _gdrive_post_comment(agent, doc_id, name,
+                                     [c.get("content", "") for c in threads], log)
+
+    # Only acknowledge once a change has settled; otherwise leave the baseline so the
+    # stable_polls debounce can accumulate across polls (advancing every poll would
+    # mean a change never settles and nothing is ever posted).
+    if settled:
+        agent["base"] = cur
+        for p in settled:
+            agent["stable"].pop(p, None)
+        save_state(agent)
+    elif agent["base"] is None:
+        agent["base"] = cur                                # first poll: establish baseline
+
+
+@_acting
 def act(agent, d, log):
-    """Act on a settled batch of changes. Returns the list of watched-folder files
-    this call WROTE to (so the caller can re-baseline them and avoid self-triggering)."""
+    """Act on a settled batch of changes. Returns the list of watched items this call
+    WROTE to (so the caller can re-baseline them and avoid self-triggering)."""
     cfg, folder, out_dir = agent["cfg"], agent["watch_dir"], agent["out_dir"]
     events = cfg["events"]
     present = [p for lbl in ("added", "modified") if lbl in events for p in d.get(lbl, [])]
@@ -399,8 +591,29 @@ def act(agent, d, log):
 
 # --- per-agent loop -------------------------------------------------------
 
+def gdrive_snapshot(agent):
+    """{doc_id: modifiedTime} for the watched Google Docs — either the Docs listed in
+    config (doc_ids) or every Doc in folder_id. Also caches id -> {name, modifiedTime}
+    on the agent so act() can read and name them."""
+    import gdoc
+    cfg = agent["cfg"]
+    if cfg.get("doc_ids"):
+        docs = []
+        for ref in cfg["doc_ids"]:
+            try:
+                docs.append(gdoc.doc_meta(gdoc.extract_id(ref)))
+            except Exception:                              # noqa: BLE001  (skip unreadable)
+                continue
+    else:
+        docs = gdoc.list_docs(gdoc.extract_id(cfg["folder_id"]))
+    agent["_gdocs"] = {d["id"]: d for d in docs}
+    return {d["id"]: d["modifiedTime"] for d in docs}
+
+
 def _snap(agent):
     c = agent["cfg"]
+    if c.get("source") == "gdrive":
+        return gdrive_snapshot(agent)
     return snapshot(agent["watch_dir"], c["include"], c["exclude"],
                     c["recursive"], agent["skip_abs"])
 
@@ -422,8 +635,9 @@ def load_state(agent):
     base = data.get("base")
     if not isinstance(base, dict):
         return None
-    # JSON has no tuples: restore (size, mtime_ns) so diff() compares like-for-like.
-    return {k: tuple(v) for k, v in base.items()}
+    # Local sigs are [size, mtime_ns] lists -> restore to tuples so diff() compares
+    # like-for-like. gdrive sigs are modifiedTime strings -> leave as-is.
+    return {k: (tuple(v) if isinstance(v, list) else v) for k, v in base.items()}
 
 
 def save_state(agent):
@@ -452,6 +666,8 @@ def make_logger(agent):
 def poll_once(agent, log):
     """One check-and-act cycle for an agent; updates its debounce state."""
     cfg = agent["cfg"]
+    if cfg.get("source") == "gdrive":
+        return poll_gdrive(agent, log)
     agent["last_poll"] = time.time()
     cur = _snap(agent)
     d = diff(agent["base"], cur)
@@ -644,7 +860,8 @@ class Supervisor:
             cfg = a.get("cfg") or {}
             out.append({
                 "name": name, "enabled": self.enabled.get(name, True),
-                "running": bool(a.get("running")), "model": cfg.get("model"),
+                "running": bool(a.get("running")), "acting": bool(a.get("acting")),
+                "model": cfg.get("model"),
                 "interval": cfg.get("interval"), "dry_run": cfg.get("dry_run"),
                 "watch_dir": a.get("watch_dir"), "actions": a.get("actions", 0),
                 "last_poll": a.get("last_poll"), "last_action": a.get("last_action"),

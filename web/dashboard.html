@@ -24,6 +24,13 @@
   .top { display:flex; align-items:center; gap:10px; }
   .dot { width:10px; height:10px; border-radius:50%; background:var(--off); flex:none; }
   .run .dot { background:var(--on); box-shadow:0 0 0 3px #2f6b3a22; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .spin { display:inline-block; width:11px; height:11px; border:2px solid #cfd8e2;
+          border-top-color:var(--bar); border-radius:50%; animation:spin .7s linear infinite;
+          vertical-align:-2px; margin-right:5px; }
+  .working .dot { background:#e0a100; box-shadow:0 0 0 3px #e0a10033; animation:pulse 1s ease-in-out infinite; }
+  .working .state { color:#9a6b00; }
   .name { font-weight:700; font-size:1rem; }
   .state { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
   .run .state { color:var(--on); }
@@ -69,6 +76,7 @@
 const $ = id => document.getElementById(id);
 const esc = s => (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 let busy = new Set();           // names mid-toggle, to avoid flip-flop while awaiting
+let stick = {};                 // per-agent: follow newest log line unless scrolled up
 
 function ago(ts) {
   if (!ts) return "—";
@@ -83,8 +91,7 @@ async function api(path, method) {
   return r.json().catch(() => ({}));
 }
 
-function card(a) {
-  const open = !!(document.querySelector(`details[data-n="${CSS.escape(a.name)}"]`) || {}).open;
+function cardInner(a, open) {
   const tags = [];
   if (a.model) tags.push(`<span class="tag">${esc(a.model)}</span>`);
   if (a.interval) tags.push(`<span class="tag">every ${esc(a.interval)}s</span>`);
@@ -96,11 +103,12 @@ function card(a) {
   const log = (a.recent || []).map(esc).join("\n") || "(no activity yet)";
   const checked = a.running ? "checked" : "";
   const disabled = (busy.has(a.name) || a.error && !a.model) ? "disabled" : "";
-  return `<div class="card ${a.running ? "run" : ""}">
+  return `
     <div class="top">
       <span class="dot"></span>
       <div><div class="name">${esc(a.name)}</div>
-           <div class="state">${a.running ? "running" : "stopped"}</div></div>
+           <div class="state">${a.acting ? '<span class="spin"></span>working…'
+                                           : (a.running ? "running" : "stopped")}</div></div>
       <label class="toggle switch" title="Turn ${a.running ? "off" : "on"}">
         <input type="checkbox" data-n="${esc(a.name)}" ${checked} ${disabled}>
         <span class="slider"></span></label>
@@ -115,8 +123,7 @@ function card(a) {
     <details data-n="${esc(a.name)}" ${open ? "open" : ""}>
       <summary>Recent activity</summary>
       <pre class="log">${log}</pre>
-    </details>
-  </div>`;
+    </details>`;
 }
 
 async function refresh() {
@@ -125,7 +132,42 @@ async function refresh() {
   $("empty").style.display = list.length ? "none" : "block";
   const running = list.filter(a => a.running).length;
   $("sub").textContent = list.length ? `${running} of ${list.length} running` : "";
-  $("grid").innerHTML = list.map(card).join("");
+
+  const grid = $("grid");
+  const names = new Set(list.map(a => a.name));
+  // drop cards for agents no longer present
+  [...grid.children].forEach(el => { if (!names.has(el.dataset.card)) el.remove(); });
+
+  for (const a of list) {
+    const name = a.name;
+    let el = grid.querySelector(`[data-card="${CSS.escape(name)}"]`);
+    let open = false, prevTop = 0;
+    if (el) {
+      const det = el.querySelector("details");
+      open = det ? det.open : false;         // preserve expanded/collapsed state
+      const oldPre = el.querySelector("pre.log");
+      if (oldPre) prevTop = oldPre.scrollTop; // remember scroll position
+    } else {
+      el = document.createElement("div");
+      el.dataset.card = name;
+    }
+    el.className = "card" + (a.running ? " run" : "") + (a.acting ? " working" : "");
+    el.innerHTML = cardInner(a, open);
+    grid.appendChild(el);                    // keep DOM order matching the list
+
+    const pre = el.querySelector("pre.log");
+    const det = el.querySelector("details");
+    if (pre) {
+      // follow the newest line unless the user has scrolled up (then hold their spot)
+      pre.scrollTop = stick[name] !== false ? pre.scrollHeight : prevTop;
+      pre.onscroll = () => {
+        stick[name] = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+      };
+    }
+    if (det && pre) det.ontoggle = () => {     // expanding shows the newest line
+      if (det.open && stick[name] !== false) pre.scrollTop = pre.scrollHeight;
+    };
+  }
   bindToggles();
 }
 

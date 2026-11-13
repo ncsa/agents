@@ -4,9 +4,12 @@ service_account.json
 *-sa.json
 credentials*.json
 token.json
+oauth_client.json
 
 # Runtime
 responses/
 inbox/
 .agent_state.json
 __pycache__/
+
+.DS_store

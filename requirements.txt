@@ -5,3 +5,8 @@ openai         # Lumen gateway client (agents.py -> lumen.py)
 pypdf          # read .pdf files dropped into a watched folder
 python-docx    # read .docx files dropped into a watched folder
 PyYAML         # load config.yaml / agents.yaml
+
+# Google Drive / Docs (gdoc.py): read Google Docs and post comments as you
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2

@@ -1,59 +1,52 @@
-# Lightweight folder-watching agent.
+# Yanello — a mentoring agent that watches Google Doc(s) and posts coaching comments.
 #
-# Watches `watch_dir` for activity and, when changed files settle, sends their
-# contents to Lumen using Prompt.md as the instruction, then saves the response.
-# All relative paths are resolved against this config file's folder.
+# It polls the Doc(s) below for edits and, when a Doc settles, reads it and posts
+# guidance as Google Docs comments authored by the signed-in user (see gdoc.py).
+# Comments appear live in the open Doc — no reload needed.
 
-# Folder to watch. Point it at a local folder or a Google Drive for Desktop folder.
-# Created automatically if it does not exist.
-watch_dir: ./Logs
+# --- what to watch --------------------------------------------------------
+# source: gdrive = Google Docs via the Drive API (auth + reading via gdoc.py).
+source: gdrive
 
-# The instruction that decides how to act on changed files (see Prompt.md).
+# Watch specific Doc(s) directly. Each entry may be a pasted Docs URL or a bare ID.
+# (Alternatively, set `folder_id:` instead to watch every Google Doc in a folder.)
+doc_ids:
+  - https://docs.google.com/document/d/1N7DHSNx5s77ELc5cSjzU1lTePeCb87Aj5nOb3lpDWvQ/edit
+# folder_id:
+
+# The coaching instruction (see Prompt.md).
 prompt: Prompt.md
 
 # Lumen model (served by the NCSA Lumen gateway).
 model: glm-5.3
 
-# Polling. A changed file must look identical for `stable_polls` consecutive checks
-# after it is first seen before it is acted on, so a file still being written (or
-# mid-Drive-sync) is not picked up half-done. stable_polls: 0 acts immediately.
-interval: 5          # seconds between checks
+# Polling. A Doc must look unchanged for `stable_polls` consecutive checks after an
+# edit is first seen before it is acted on, so the agent waits for the student to
+# pause rather than commenting mid-edit. stable_polls: 0 acts immediately.
+interval: 15         # seconds between checks (Drive API; no need to poll fast)
 stable_polls: 1
 
-# What counts as activity: any of added, modified, removed.
+# What counts as activity. (removed has nothing to comment on, so added/modified.)
 events: [added, modified]
-recursive: true
 
-# Which files to consider. include: extensions (empty list = every file).
-# exclude: glob patterns on the file name. Hidden files and the output folder are
-# always skipped.
-include: [.docx]
-exclude: ["*.tmp", "~*"]
+# Guidance style: keep a single unresolved coaching comment open at a time, framed as
+# the student's one next step. The agent also always replies in any thread whose last
+# message is from someone other than itself (the student), so a conversation can happen;
+# it never replies to its own messages. When the student resolves the open comment, the
+# next edit earns a new next-step comment.
+max_notes: 1
 
-# How much of each file to send, and whether to make one model call per batch of
-# settled changes (false) or a separate call per file (true).
+# How much of each Doc's text to send to the model.
 max_file_chars: 100000
-per_file: false
 
-# On the agent's FIRST run only, treat files already present as new and act on them
-# once. Default false: only act on changes made after the agent starts.
-#
-# After the first run the agent remembers what it has handled in .agent_state.json
-# (gitignored, in the agent folder), so restarting does NOT re-run unchanged files.
-# On every start it acts only on files that are new or changed since last time,
-# including ones added while it was stopped. Delete .agent_state.json to start fresh.
-process_existing: false
+# On the FIRST run only, treat the Doc(s) already present as new and comment once.
+# After that the agent remembers what it handled in .agent_state.json (gitignored),
+# so restarting does not re-comment unchanged Docs; it acts only on later edits.
+process_existing: true
 
-# Where responses are written (relative to this config's folder). Each action saves
-# a timestamped file with the response and the exact context that produced it.
+# Where dry-run previews are written (relative to this config's folder). In normal
+# gdrive operation the guidance goes into the Doc as comments, not here.
 output_dir: responses
 
-# Assemble and save the prompt + context WITHOUT calling Lumen (for trying things out).
+# Assemble the prompt + context WITHOUT calling Lumen (saves a preview to output_dir).
 dry_run: false
-
-# Write the agent's guidance back into each changed .docx as real Word comments
-# (anchored to the text they apply to), instead of saving a separate response file.
-# This keeps all interaction inside the document. The agent reads the comments it has
-# already left and is told not to repeat them, and its own write is not treated as a
-# new change (so it will not comment on its own comments). Needs python-docx >= 1.2.
-comment_docx: true
