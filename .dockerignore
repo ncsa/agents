@@ -1,0 +1,13 @@
+# Keep secrets/credentials out of the image (forwarded via env at runtime).
+*_key.txt
+token.json
+oauth_client.json
+
+# Dev cruft
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.git/
+.gitignore
+.DS_Store
