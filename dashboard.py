@@ -18,15 +18,56 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from flask import Flask, jsonify, send_from_directory
+import csv
+import hmac
+
+from flask import Flask, Response, jsonify, request, send_from_directory
+from werkzeug.security import check_password_hash
 import agents as A
 
 HOST = os.environ.get("AGENTS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AGENTS_PORT", "5080"))
 WEB = os.path.join(HERE, "web")
+USERS_FILE = os.environ.get("AGENTS_USERS", os.path.join(HERE, "users.csv"))
 
 app = Flask(__name__)
 SUP = None                                  # the Supervisor, created in main()
+
+
+# --- HTTP Basic Auth against users.csv (same scheme as docent/pisuite) ----------
+def load_users(path):
+    """username -> password (or werkzeug hash) from a headerless CSV."""
+    users = {}
+    if os.path.isfile(path):
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.reader(f):
+                if len(row) >= 2 and row[0].strip():
+                    users[row[0].strip()] = row[1].strip()
+    return users
+
+
+USERS = load_users(USERS_FILE)
+if not USERS:
+    print(f"WARNING: no users loaded from {USERS_FILE}; all logins will fail. "
+          f"Add 'username,password' lines (passwords may be werkzeug hashes).")
+
+
+def _password_ok(username, password):
+    stored = USERS.get(username)
+    if stored is None or password is None:
+        return False
+    if stored.startswith(("pbkdf2:", "scrypt:", "argon2")):
+        return check_password_hash(stored, password)
+    return hmac.compare_digest(stored, password)
+
+
+@app.before_request
+def _require_auth():
+    auth = request.authorization
+    if not auth or not _password_ok(auth.username, auth.password):
+        return Response("Authentication required.", 401,
+                        {"WWW-Authenticate": 'Basic realm="Agents Dashboard"'})
+    return None
 
 
 @app.route("/")

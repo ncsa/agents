@@ -1,6 +1,7 @@
 # Python dependencies for the folder-watching agents fleet.
 #   setup.sh installs these into ~/.venvs/agents on first run.
 flask          # dashboard.py web UI
+werkzeug       # Basic Auth password hashes (ships with flask)
 openai         # Lumen gateway client (agents.py -> lumen.py)
 pypdf          # read .pdf files dropped into a watched folder
 python-docx    # read .docx files dropped into a watched folder
