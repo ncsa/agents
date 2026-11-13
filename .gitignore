@@ -1,7 +1,12 @@
 # Secrets — never commit
 *_key.txt
+service_account.json
+*-sa.json
+credentials*.json
+token.json
 
 # Runtime
 responses/
 inbox/
+.agent_state.json
 __pycache__/

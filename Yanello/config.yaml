@@ -6,7 +6,7 @@
 
 # Folder to watch. Point it at a local folder or a Google Drive for Desktop folder.
 # Created automatically if it does not exist.
-watch_dir: ./inbox
+watch_dir: ./Logs
 
 # The instruction that decides how to act on changed files (see Prompt.md).
 prompt: Prompt.md
@@ -27,7 +27,7 @@ recursive: true
 # Which files to consider. include: extensions (empty list = every file).
 # exclude: glob patterns on the file name. Hidden files and the output folder are
 # always skipped.
-include: [.txt, .md, .csv, .pdf, .docx]
+include: [.docx]
 exclude: ["*.tmp", "~*"]
 
 # How much of each file to send, and whether to make one model call per batch of
@@ -35,8 +35,13 @@ exclude: ["*.tmp", "~*"]
 max_file_chars: 100000
 per_file: false
 
-# On startup, treat files already present as new and act on them once. Default
-# false: only act on changes made after the agent starts.
+# On the agent's FIRST run only, treat files already present as new and act on them
+# once. Default false: only act on changes made after the agent starts.
+#
+# After the first run the agent remembers what it has handled in .agent_state.json
+# (gitignored, in the agent folder), so restarting does NOT re-run unchanged files.
+# On every start it acts only on files that are new or changed since last time,
+# including ones added while it was stopped. Delete .agent_state.json to start fresh.
 process_existing: false
 
 # Where responses are written (relative to this config's folder). Each action saves
@@ -45,3 +50,10 @@ output_dir: responses
 
 # Assemble and save the prompt + context WITHOUT calling Lumen (for trying things out).
 dry_run: false
+
+# Write the agent's guidance back into each changed .docx as real Word comments
+# (anchored to the text they apply to), instead of saving a separate response file.
+# This keeps all interaction inside the document. The agent reads the comments it has
+# already left and is told not to repeat them, and its own write is not treated as a
+# new change (so it will not comment on its own comments). Needs python-docx >= 1.2.
+comment_docx: true

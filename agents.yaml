@@ -1,0 +1,20 @@
+# Agent registry — which agents agents.py activates when run.
+#
+# Each agent is a folder under agents/ containing its own config.yaml and Prompt.md
+# (e.g. agents/Yanello/). List a folder name here to activate that agent. Run them all
+# with:  python3 agents.py
+#
+# To deploy a new agent: copy an existing folder, edit its config.yaml + Prompt.md,
+# and add its name to the list below.
+
+agents:
+  - Yanello
+  # Disable without removing by using the long form:
+  # - name: Yanello
+  #   enabled: false
+
+# Optional overrides applied to every agent. An agent's own config.yaml wins over
+# anything set here; command-line flags (--dry-run, --interval) win over both.
+# defaults:
+#   dry_run: true
+#   interval: 10

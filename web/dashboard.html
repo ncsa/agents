@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agents</title>
+<style>
+  :root { --bar:#1a3a5c; --bg:#f4f6f8; --card:#fff; --border:#e2e6ea; --muted:#6b7480;
+          --on:#2f6b3a; --onbg:#eaf6ee; --off:#9aa3ad; --bad:#b02020;
+          --font:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:#1a1a1a; font-family:var(--font); line-height:1.5; }
+  header { background:var(--bar); color:#fff; padding:14px 22px; display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:1.1rem; margin:0; font-weight:700; }
+  header .sub { color:#cdd7e3; font-size:.8rem; margin-left:2px; }
+  header .spacer { flex:1; }
+  header button { font:inherit; font-size:13px; border:0; border-radius:7px; padding:7px 13px;
+                  cursor:pointer; background:#ffffff22; color:#fff; }
+  header button:hover { background:#ffffff33; }
+  main { max-width:1000px; margin:0 auto; padding:18px 16px 60px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:14px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:15px 16px; }
+  .card.run { border-color:#bfe0c9; box-shadow:0 1px 0 #cfe6d6; }
+  .top { display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--off); flex:none; }
+  .run .dot { background:var(--on); box-shadow:0 0 0 3px #2f6b3a22; }
+  .name { font-weight:700; font-size:1rem; }
+  .state { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .run .state { color:var(--on); }
+  .toggle { margin-left:auto; }
+  .switch { position:relative; width:46px; height:26px; display:inline-block; }
+  .switch input { opacity:0; width:0; height:0; }
+  .slider { position:absolute; inset:0; background:#cfd4da; border-radius:26px; transition:.15s; cursor:pointer; }
+  .slider::before { content:""; position:absolute; height:20px; width:20px; left:3px; top:3px;
+                    background:#fff; border-radius:50%; transition:.15s; }
+  .switch input:checked + .slider { background:var(--on); }
+  .switch input:checked + .slider::before { transform:translateX(20px); }
+  .switch input:disabled + .slider { opacity:.5; cursor:not-allowed; }
+  .meta { margin-top:10px; font-size:12.5px; color:var(--muted); display:grid; gap:3px; }
+  .meta b { color:#333; font-weight:600; }
+  .tags { margin-top:9px; display:flex; flex-wrap:wrap; gap:6px; }
+  .tag { font-size:11px; padding:2px 8px; border-radius:20px; background:#eef1f4; color:#425; }
+  .tag.dry { background:#fff4e0; color:#8a5a12; }
+  .tag.err { background:#fbe3e3; color:var(--bad); }
+  .act { margin-top:10px; font-size:12.5px; }
+  .act .lbl { color:var(--muted); }
+  details { margin-top:10px; }
+  summary { cursor:pointer; font-size:12.5px; color:var(--muted); }
+  pre.log { margin:8px 0 0; background:#0f1b27; color:#d6e2ee; border-radius:8px; padding:9px 11px;
+            font-size:11.5px; line-height:1.45; max-height:200px; overflow:auto; white-space:pre-wrap; }
+  .empty { color:var(--muted); padding:40px; text-align:center; }
+  .err { color:var(--bad); font-size:12.5px; margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agents</h1>
+  <span class="sub" id="sub"></span>
+  <span class="spacer"></span>
+  <button id="startAll">Start all</button>
+  <button id="stopAll">Stop all</button>
+</header>
+<main>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">No agents in the registry.</div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+let busy = new Set();           // names mid-toggle, to avoid flip-flop while awaiting
+
+function ago(ts) {
+  if (!ts) return "—";
+  const s = Math.max(0, Math.round(Date.now()/1000 - ts));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s/60) + "m ago";
+  return Math.round(s/3600) + "h ago";
+}
+
+async function api(path, method) {
+  const r = await fetch(path, { method: method || "GET" });
+  return r.json().catch(() => ({}));
+}
+
+function card(a) {
+  const open = !!(document.querySelector(`details[data-n="${CSS.escape(a.name)}"]`) || {}).open;
+  const tags = [];
+  if (a.model) tags.push(`<span class="tag">${esc(a.model)}</span>`);
+  if (a.interval) tags.push(`<span class="tag">every ${esc(a.interval)}s</span>`);
+  if (a.dry_run) tags.push(`<span class="tag dry">dry run</span>`);
+  if (!a.enabled) tags.push(`<span class="tag">disabled in registry</span>`);
+  const la = a.last_action
+    ? `acted ${ago(a.last_action.at)} · ${esc(a.last_action.file)}`
+    : "no actions yet";
+  const log = (a.recent || []).map(esc).join("\n") || "(no activity yet)";
+  const checked = a.running ? "checked" : "";
+  const disabled = (busy.has(a.name) || a.error && !a.model) ? "disabled" : "";
+  return `<div class="card ${a.running ? "run" : ""}">
+    <div class="top">
+      <span class="dot"></span>
+      <div><div class="name">${esc(a.name)}</div>
+           <div class="state">${a.running ? "running" : "stopped"}</div></div>
+      <label class="toggle switch" title="Turn ${a.running ? "off" : "on"}">
+        <input type="checkbox" data-n="${esc(a.name)}" ${checked} ${disabled}>
+        <span class="slider"></span></label>
+    </div>
+    <div class="tags">${tags.join("")}</div>
+    <div class="meta">
+      <div><b>Watches</b> ${esc(a.watch_dir || "—")}</div>
+      <div><b>Actions</b> ${a.actions||0} · last poll ${ago(a.last_poll)}</div>
+    </div>
+    <div class="act"><span class="lbl">${esc(la)}</span></div>
+    ${a.error ? `<div class="err">⚠ ${esc(a.error)}</div>` : ""}
+    <details data-n="${esc(a.name)}" ${open ? "open" : ""}>
+      <summary>Recent activity</summary>
+      <pre class="log">${log}</pre>
+    </details>
+  </div>`;
+}
+
+async function refresh() {
+  const data = await api("/api/agents");
+  const list = data.agents || [];
+  $("empty").style.display = list.length ? "none" : "block";
+  const running = list.filter(a => a.running).length;
+  $("sub").textContent = list.length ? `${running} of ${list.length} running` : "";
+  $("grid").innerHTML = list.map(card).join("");
+  bindToggles();
+}
+
+function bindToggles() {
+  document.querySelectorAll('input[type=checkbox][data-n]').forEach(cb => {
+    cb.onchange = async () => {
+      const name = cb.dataset.n;
+      busy.add(name); cb.disabled = true;
+      await api(`/api/agents/${encodeURIComponent(name)}/${cb.checked ? "start" : "stop"}`, "POST");
+      busy.delete(name);
+      await refresh();
+    };
+  });
+}
+
+$("startAll").onclick = async () => { await api("/api/agents/start-all", "POST"); refresh(); };
+$("stopAll").onclick  = async () => { await api("/api/agents/stop-all", "POST"); refresh(); };
+
+refresh();
+setInterval(() => { if (!busy.size) refresh(); }, 3000);
+</script>
+</body>
+</html>
