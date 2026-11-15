@@ -646,7 +646,10 @@ def save_state(agent):
     try:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"base": {k: list(v) for k, v in agent["base"].items()},
+            # Local sigs are (size, mtime_ns) tuples -> store as lists; gdrive sigs are
+            # modifiedTime STRINGS -> store as-is (list() would split them into chars).
+            json.dump({"base": {k: (list(v) if isinstance(v, (tuple, list)) else v)
+                                for k, v in agent["base"].items()},
                        "saved": time.time()}, f)
         os.replace(tmp, path)
     except OSError:
